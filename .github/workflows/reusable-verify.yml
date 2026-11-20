@@ -1,0 +1,45 @@
+name: Reusable repository verification
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: Go release to install before running the caller verifier.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Run caller verifier on Windows
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Validate caller event
+        shell: pwsh
+        run: >-
+          if ($env:GITHUB_EVENT_NAME -cnotin @('push', 'pull_request', 'workflow_dispatch')) {
+              throw 'Unsupported caller event. Use push, pull_request, or workflow_dispatch.'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        if: ${{ inputs.go-version != '' }}
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: false
+      - name: Verify the caller repository
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verifier = Join-Path (Get-Location).Path 'scripts/verify.ps1'
+          if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) {
+              throw 'Required verifier scripts/verify.ps1 is missing.'
+          }
+          $engine = (Get-Process -Id $PID -ErrorAction Stop).Path
+          & $engine -NoProfile -NonInteractive -File $verifier
+          exit $LASTEXITCODE

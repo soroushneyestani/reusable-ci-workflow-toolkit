@@ -1,0 +1,97 @@
+name: Reusable Java verification
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: Supported Temurin JDK major release, 21.
+        type: string
+        default: '21'
+    outputs:
+      artifact-name:
+        description: Name of the uploaded artifact for this run attempt.
+        value: ${{ jobs.verify.outputs.artifact-name }}
+      artifact-id:
+        description: GitHub Actions ID of the uploaded artifact.
+        value: ${{ jobs.verify.outputs.artifact-id }}
+      artifact-digest:
+        description: SHA-256 digest reported by GitHub for the artifact archive.
+        value: ${{ jobs.verify.outputs.artifact-digest }}
+      cache-status:
+        description: Maven cache status, one of disabled, miss, or hit.
+        value: ${{ jobs.verify.outputs.cache-status }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify and package the caller Java application
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ARTIFACT_NAME: ${{ github.run_attempt == '1' && 'java-jar' || format('java-jar-attempt-{0}', github.run_attempt) }}
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id != '' && env.ARTIFACT_NAME || '' }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      cache-status: ${{ steps.java.outputs.cache-primary-key != '' && (steps.java.outputs.cache-hit == 'true' && 'hit' || 'miss') || 'disabled' }}
+    steps:
+      - name: Validate Java workflow invocation
+        shell: pwsh
+        env:
+          REQUESTED_JAVA_VERSION: ${{ inputs.java-version }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -cnotin @('push', 'pull_request', 'workflow_dispatch')) {
+              throw 'Use only push, pull_request, or workflow_dispatch to run this workflow.'
+          }
+          if ($env:REQUESTED_JAVA_VERSION -cne '21') {
+              throw 'java-version must be 21.'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate caller Maven configuration
+        shell: pwsh
+        run: |
+          $pom = Get-Item -LiteralPath 'pom.xml' -Force -ErrorAction SilentlyContinue
+          if (-not $pom -or $pom.PSIsContainer -or ($pom.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+              throw 'A regular caller root pom.xml is required.'
+          }
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
+        id: java
+        with:
+          distribution: temurin
+          java-version: '21.0.13.1+2'
+          cache: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'maven' || '' }}
+          cache-jdk: false
+          overwrite-settings: false
+      - name: Verify and stage the Java application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & mvn --batch-mode --no-transfer-progress --strict-checksums clean verify
+          if ($LASTEXITCODE -ne 0) { throw 'Maven clean verify failed.' }
+
+          $jar = Get-Item -LiteralPath 'target/app.jar' -Force -ErrorAction SilentlyContinue
+          $target = Get-Item -LiteralPath 'target' -Force -ErrorAction SilentlyContinue
+          $link = [IO.FileAttributes]::ReparsePoint
+          if (-not $jar -or $jar.PSIsContainer -or ($jar.Attributes -band $link) -or ($target.Attributes -band $link)) {
+              throw 'Maven must produce a regular target/app.jar.'
+          }
+          if ($PSVersionTable.PSEdition -eq 'Core' -and $IsLinux) {
+              & /usr/bin/test -f $jar.FullName
+              if ($LASTEXITCODE -ne 0) { throw 'Maven must produce a regular target/app.jar.' }
+          }
+
+          $stage = Join-Path $env:RUNNER_TEMP 'java-verification'
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath $jar.FullName -Destination (Join-Path $stage 'app.jar')
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/java-verification/app.jar
+          if-no-files-found: error
+          retention-days: 7

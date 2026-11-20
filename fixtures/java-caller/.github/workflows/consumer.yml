@@ -1,0 +1,57 @@
+name: Java consumer
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  java:
+    name: Java on Linux
+    uses: soroushneyestani/reusable-ci-workflow-toolkit/.github/workflows/reusable-java.yml@FULL_TOOLKIT_SHA
+    with:
+      java-version: '21'
+  verify-jar:
+    name: Verify Java artifact
+    needs: java
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check workflow outputs
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: ${{ needs.java.outputs.artifact-name }}
+          ARTIFACT_ID: ${{ needs.java.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.java.outputs.artifact-digest }}
+          CACHE_STATUS: ${{ needs.java.outputs.cache-status }}
+        run: |
+          if (-not $env:ARTIFACT_NAME -or $env:ARTIFACT_ID -cnotmatch '\A[1-9][0-9]*\z' -or
+              $env:ARTIFACT_DIGEST -notmatch '\A[0-9a-f]{64}\z' -or
+              $env:CACHE_STATUS -cnotin @('miss', 'hit', 'disabled')) {
+              throw 'Java workflow outputs did not satisfy the declared contract.'
+          }
+      - name: Download the caller artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.java.outputs.artifact-name }}
+          path: ${{ runner.temp }}/consumer-artifact
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21.0.13.1+2'
+      - name: Run the downloaded JAR
+        shell: pwsh
+        env:
+          CACHE_STATUS: ${{ needs.java.outputs.cache-status }}
+        run: |
+          $directory = Join-Path $env:RUNNER_TEMP 'consumer-artifact'
+          $entries = @(Get-ChildItem -LiteralPath $directory -Force)
+          if ($entries.Count -ne 1 -or $entries[0].Name -cne 'app.jar' -or $entries[0].PSIsContainer) {
+              throw 'The Java artifact must contain one app.jar.'
+          }
+          $result = @(& java -jar $entries[0].FullName)
+          if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1 -or $result[0] -cne 'hello from the Java caller') {
+              throw 'The downloaded Java JAR did not produce the expected greeting.'
+          }
+          Write-Output "evidence:java:cache-status=$env:CACHE_STATUS"

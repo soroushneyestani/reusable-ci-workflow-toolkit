@@ -1,0 +1,86 @@
+name: Go consumer
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  go-linux:
+    name: Go on Linux
+    uses: soroushneyestani/reusable-ci-workflow-toolkit/.github/workflows/reusable-go.yml@FULL_TOOLKIT_SHA
+    with:
+      go-version: '1.27.4'
+  go-windows:
+    name: Go on Windows
+    uses: soroushneyestani/reusable-ci-workflow-toolkit/.github/workflows/reusable-go.yml@FULL_TOOLKIT_SHA
+    with:
+      go-version: '1.27.4'
+      runner: windows-2025
+  verify-artifact:
+    name: Verify Go artifact (${{ matrix.platform }})
+    needs: [go-linux, go-windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            evidence-name: go-linux
+            runner: ubuntu-24.04
+            executable: app
+            artifact-name: ${{ needs.go-linux.outputs.artifact-name }}
+            artifact-id: ${{ needs.go-linux.outputs.artifact-id }}
+            artifact-digest: ${{ needs.go-linux.outputs.artifact-digest }}
+            cache-status: ${{ needs.go-linux.outputs.cache-status }}
+          - platform: Windows
+            evidence-name: go-windows
+            runner: windows-2025
+            executable: app.exe
+            artifact-name: ${{ needs.go-windows.outputs.artifact-name }}
+            artifact-id: ${{ needs.go-windows.outputs.artifact-id }}
+            artifact-digest: ${{ needs.go-windows.outputs.artifact-digest }}
+            cache-status: ${{ needs.go-windows.outputs.cache-status }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Check workflow outputs
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact-name }}
+          ARTIFACT_ID: ${{ matrix.artifact-id }}
+          ARTIFACT_DIGEST: ${{ matrix.artifact-digest }}
+          CACHE_STATUS: ${{ matrix.cache-status }}
+        run: |
+          if (-not $env:ARTIFACT_NAME -or $env:ARTIFACT_ID -cnotmatch '\A[1-9][0-9]*\z' -or
+              $env:ARTIFACT_DIGEST -notmatch '\A[0-9a-f]{64}\z' -or
+              $env:CACHE_STATUS -cnotin @('miss', 'hit', 'disabled')) {
+              throw 'Go workflow outputs did not satisfy the declared contract.'
+          }
+      - name: Download the caller artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ runner.temp }}/consumer-artifact
+      - name: Run the downloaded executable
+        shell: pwsh
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          EVIDENCE_NAME: ${{ matrix.evidence-name }}
+          CACHE_STATUS: ${{ matrix.cache-status }}
+        run: |
+          $directory = Join-Path $env:RUNNER_TEMP 'consumer-artifact'
+          $entries = @(Get-ChildItem -LiteralPath $directory -Force)
+          if ($entries.Count -ne 1 -or $entries[0].Name -cne $env:EXECUTABLE -or $entries[0].PSIsContainer) {
+              throw 'The Go artifact must contain one executable.'
+          }
+          $app = $entries[0].FullName
+          if ($IsLinux) {
+              & chmod +x $app
+              if ($LASTEXITCODE -ne 0) { throw 'Could not restore the executable bit.' }
+          }
+          $result = @(& $app)
+          if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1 -or
+              $result[0] -cne 'hello from the Go caller: 00000000-0000-0000-0000-000000000001') {
+              throw 'The downloaded Go executable did not produce the expected greeting.'
+          }
+          Write-Output "evidence:${env:EVIDENCE_NAME}:cache-status=$env:CACHE_STATUS"
