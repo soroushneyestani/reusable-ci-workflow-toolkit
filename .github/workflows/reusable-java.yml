@@ -7,6 +7,10 @@ on:
         description: Supported Temurin JDK major release, 21.
         type: string
         default: '21'
+      cache-on-owner-dispatch:
+        description: Enable caching for a first-attempt dispatch by the caller repository owner on its default branch.
+        type: boolean
+        default: false
     outputs:
       artifact-name:
         description: Name of the uploaded artifact for this run attempt.
@@ -58,12 +62,27 @@ jobs:
           if (-not $pom -or $pom.PSIsContainer -or ($pom.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
               throw 'A regular caller root pom.xml is required.'
           }
+      - name: Select Maven dependency cache policy
+        id: cache
+        shell: pwsh
+        env:
+          CALLER_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ALLOW_OWNER_DISPATCH_CACHE: ${{ inputs.cache-on-owner-dispatch }}
+        run: |
+          $ownerDispatch = $env:GITHUB_EVENT_NAME -ceq 'workflow_dispatch' -and
+              $env:ALLOW_OWNER_DISPATCH_CACHE -ceq 'true' -and
+              $env:GITHUB_ACTOR_ID -cmatch '^[1-9][0-9]*$' -and
+              $env:GITHUB_ACTOR_ID -ceq $env:GITHUB_REPOSITORY_OWNER_ID -and
+              $env:GITHUB_RUN_ATTEMPT -ceq '1'
+          $enabled = $env:GITHUB_REF -ceq "refs/heads/$env:CALLER_DEFAULT_BRANCH" -and
+              ($env:GITHUB_EVENT_NAME -ceq 'push' -or $ownerDispatch)
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "enabled=$($enabled.ToString().ToLowerInvariant())" -Encoding utf8
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
         id: java
         with:
           distribution: temurin
           java-version: '21.0.13.1+2'
-          cache: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'maven' || '' }}
+          cache: ${{ steps.cache.outputs.enabled == 'true' && 'maven' || '' }}
           cache-jdk: false
           overwrite-settings: false
       - name: Verify and stage the Java application

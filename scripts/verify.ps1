@@ -58,6 +58,63 @@ function Invoke-WorkflowRunBlock {
     }
 }
 
+function Test-DependencyCachePolicy {
+    param([string]$WorkflowPath, [string]$StepName, [string]$FixtureRoot, [switch]$Go)
+
+    $policy = [scriptblock]::Create((Read-WorkflowRunBlock $WorkflowPath $StepName) -join "`n")
+    $output = Join-Path $FixtureRoot 'cache-policy-output.txt'
+    $previous = @{}
+    $names = 'GITHUB_EVENT_NAME', 'GITHUB_REF', 'GITHUB_ACTOR_ID', 'GITHUB_REPOSITORY_OWNER_ID',
+        'GITHUB_RUN_ATTEMPT', 'GITHUB_OUTPUT', 'CALLER_DEFAULT_BRANCH', 'ALLOW_OWNER_DISPATCH_CACHE', 'GO_SUM_HASH'
+    foreach ($name in $names) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    $cases = @(
+        @{ Name = 'default push'; Event = 'push'; OptIn = 'false'; Expected = 'true' }
+        @{ Name = 'feature push'; Event = 'push'; Ref = 'refs/heads/topic'; Expected = 'false' }
+        @{ Name = 'owner dispatch'; Event = 'workflow_dispatch'; Expected = 'true' }
+        @{ Name = 'opt-out dispatch'; Event = 'workflow_dispatch'; OptIn = 'false'; Expected = 'false' }
+        @{ Name = 'non-owner dispatch'; Event = 'workflow_dispatch'; Actor = '2'; Expected = 'false' }
+        @{ Name = 'missing actor'; Event = 'workflow_dispatch'; Actor = ''; Expected = 'false' }
+        @{ Name = 'owner feature dispatch'; Event = 'workflow_dispatch'; Ref = 'refs/heads/topic'; Expected = 'false' }
+        @{ Name = 'owner tag dispatch'; Event = 'workflow_dispatch'; Ref = 'refs/tags/main'; Expected = 'false' }
+        @{ Name = 'owner dispatch retry'; Event = 'workflow_dispatch'; Attempt = '2'; Expected = 'false' }
+        @{ Name = 'pull request'; Event = 'pull_request'; Expected = 'false' }
+        @{ Name = 'pull request target'; Event = 'pull_request_target'; Expected = 'false' }
+    )
+    if ($Go) {
+        $cases += @{ Name = 'Go dispatch without sums'; Event = 'workflow_dispatch'; Hash = ''; Expected = 'false' }
+    }
+    try {
+        $env:CALLER_DEFAULT_BRANCH = 'main'
+        $env:GITHUB_REPOSITORY_OWNER_ID = '1'
+        $env:GITHUB_OUTPUT = $output
+        foreach ($case in $cases) {
+            $env:GITHUB_EVENT_NAME = $case.Event
+            $env:GITHUB_REF = 'refs/heads/main'
+            $env:GITHUB_ACTOR_ID = '1'
+            $env:GITHUB_RUN_ATTEMPT = '1'
+            $env:ALLOW_OWNER_DISPATCH_CACHE = 'true'
+            $env:GO_SUM_HASH = 'verified-hash'
+            if ($case.ContainsKey('Ref')) { $env:GITHUB_REF = $case.Ref }
+            if ($case.ContainsKey('Actor')) { $env:GITHUB_ACTOR_ID = $case.Actor }
+            if ($case.ContainsKey('Attempt')) { $env:GITHUB_RUN_ATTEMPT = $case.Attempt }
+            if ($case.ContainsKey('OptIn')) { $env:ALLOW_OWNER_DISPATCH_CACHE = $case.OptIn }
+            if ($case.ContainsKey('Hash')) { $env:GO_SUM_HASH = $case.Hash }
+            [IO.File]::WriteAllText($output, '')
+            & $policy
+            if ((Get-Content -LiteralPath $output -Raw -Encoding UTF8).Trim() -cne "enabled=$($case.Expected)") {
+                throw "Cache policy '$StepName' failed case '$($case.Name)'."
+            }
+        }
+    } finally {
+        foreach ($name in $names) {
+            [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
+        }
+    }
+    Write-Output "$($cases.Count) cache policy cases passed for '$StepName'."
+}
+
 function Test-GoInputs {
     param([string]$WorkflowPath, [string]$Engine, [string]$FixtureRoot, [string]$StderrPath)
 
@@ -242,6 +299,9 @@ jobs:
         throw "actionlint did not reject the deliberate invalid workflow. Exit $($badLint.Status).`n$badLintOutput"
     }
     Write-Output 'actionlint rejected the deliberate invalid workflow.'
+
+    Test-DependencyCachePolicy $goWorkflow 'Select Go dependency cache policy' $fixtureRoot -Go
+    Test-DependencyCachePolicy (Join-Path $workflowDirectory 'reusable-java.yml') 'Select Maven dependency cache policy' $fixtureRoot
 
     $stepScript = Join-Path $fixtureRoot 'workflow step.ps1'
     Set-Content -LiteralPath $stepScript -Encoding UTF8 -Value @(

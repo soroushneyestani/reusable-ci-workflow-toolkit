@@ -47,7 +47,7 @@ The generic Windows entry point runs the root `scripts/verify.ps1` in a noninter
 
 For Go and Java, a downstream job with `needs` can consume `artifact-name`, `artifact-id`, `artifact-digest` and `cache-status`. The digest identifies the uploaded archive. Retries add an attempt suffix. Download the artifact in the same run and restore the execute bit before running the extracted Linux executable. [Runnable Go example](fixtures/go-caller/.github/workflows/consumer.yml) · [Runnable Java example](fixtures/java-caller/.github/workflows/consumer.yml)
 
-Caches belong to the caller repository. The language lanes enable caching on default-branch pushes under GitHub's ref rules. Go uses `go.sum` and skips caching if it is absent. The Maven key includes matching POMs and supported Maven configuration files. JDK caching is disabled. Pull requests and manual dispatches run without the dependency cache. [Cache behavior](docs/SPEC.md#shared-boundaries)
+Caches belong to the caller repository. Default-branch pushes use the dependency cache. A caller can also set `cache-on-owner-dispatch: true` on a language job to allow a fresh manual dispatch by the repository owner on the default branch. Other dispatches and pull requests run uncached. Go uses `go.sum` and skips caching without it. Maven uses matching POMs and supported Maven configuration files. JDK caching is disabled. [Cache behavior](docs/SPEC.md#shared-boundaries)
 
 ## Verify and contribute
 
